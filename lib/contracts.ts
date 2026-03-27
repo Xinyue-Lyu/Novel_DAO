@@ -1,4 +1,4 @@
-import { BrowserProvider, Contract } from "ethers";
+import { BrowserProvider, Contract, formatEther, formatUnits } from "ethers";
 
 declare global {
   interface Window {
@@ -6,36 +6,43 @@ declare global {
   }
 }
 
-const NOVEL_TOKEN_ADDRESS = "0x1a971241945513b72FD4017C8B84380A860e5C34";
-const MEMBERSHIP_ADDRESS = "0x2DEF7E95b4d26A7218B8327eD13811E45029a203";
-const ROLE_MANAGER_ADDRESS = "0x5bdEC364351BFD78E85abB3253cE5D020328d39e";
-const CONTEST_MANAGER_ADDRESS = "0xda6Fe91b1A33bD37CdBD504983Df77485A805548";
-const TREASURY_ADDRESS = "0x949d1100549046756FF7fC5E98b25f1D8097bE93";
+export const ADDRESSES = {
+  novelToken: "0xaa75FD8D5D7F356597Eddd0941f72F4410a71Ba5",
+  membership: "0xf9aCf72AA75D38eFF8bd303cf665deEFC1197783",
+  roleManager: "0xF26eE1390be47532c9d7901bC6Aff6917cD25AB3",
+  contestManager: "0x3D77cf5f53900f8f41Ef5d4542393B7Fd75f1d4c",
+  treasury: "0xA02fDbfA8318abf9f2dFe72487106B26904035ed",
+  governor: "0x5b66103ffcb541C6cb5108c313D0a4344359834a",
+};
 
 const NOVEL_TOKEN_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
-];
-
-const MEMBERSHIP_ABI = [
-  "function checkMembership(address user) view returns (bool)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+  "function totalSupply() view returns (uint256)",
+  "function MAX_SUPPLY() view returns (uint256)",
 ];
 
 const ROLE_MANAGER_ABI = [
-  "function isAdmin(address user) view returns (bool)",
-  "function isAuthor(address user) view returns (bool)",
-  "function isReader(address user) view returns (bool)",
+  "function checkMembership(address user) view returns (bool)",
+  "function isMember(address user) view returns (bool)",
 ];
 
 const CONTEST_MANAGER_ABI = [
   "function nextContestId() view returns (uint256)",
-  "function submitNovel(uint256 contestId, string title, string contentURI)",
-  "function getSubmissionIds(uint256 contestId) view returns (uint256[])",
-  "function submissions(uint256 contestId, uint256 submissionId) view returns (string title, string contentURI, address author, uint256 voteCount, bool exists)",
-  "function vote(uint256 contestId, uint256 submissionId, uint256 amount)",
-  "function createContest(string name, uint256 submissionDeadline, uint256 votingDuration)",
+  "function nextSubmissionId() view returns (uint256)",
+  "function createContest(string name, uint256 deadline)",
   "function endVoting(uint256 contestId)",
   "function finalizeWinner(uint256 contestId)",
-  "function getWinner(uint256 contestId) view returns (uint256)",
+  "function submitNovel(uint256 contestId, string title, string contentURI)",
+  "function vote(uint256 contestId, uint256 submissionId, uint256 amount)",
+  "function getSubmission(uint256 contestId, uint256 submissionId) view returns ((string title,string contentURI,address author,uint256 voteCount,bool exists))",
+  "function getTop3SubmissionIds(uint256 contestId) view returns (uint256[3])",
+  "function getTop3Authors(uint256 contestId) view returns (address[3])",
+  "function membership() view returns (address)",
+  "function roleManager() view returns (address)",
+  "function contests(uint256) view returns (string name, uint256 deadline, bool active, bool exists, bool winnerFinalized, uint256 submissionCount)",
+  "function contestSubmissionIds(uint256, uint256) view returns (uint256)",
 ];
 
 const TREASURY_ABI = [
@@ -49,57 +56,134 @@ const TREASURY_ABI = [
 ];
 
 function getProvider() {
-  if (!window.ethereum) {
-    throw new Error("MetaMask not found");
-  }
+  if (!window.ethereum) throw new Error("MetaMask not found");
   return new BrowserProvider(window.ethereum);
 }
 
-export async function getTokenBalance(userAddress: string) {
+async function getSigner() {
   const provider = getProvider();
-  const contract = new Contract(NOVEL_TOKEN_ADDRESS, NOVEL_TOKEN_ABI, provider);
-  const balance = await contract.balanceOf(userAddress);
-  return balance.toString();
+  return await provider.getSigner();
 }
 
-export async function getMembershipStatus(userAddress: string) {
-  const provider = getProvider();
-  const contract = new Contract(MEMBERSHIP_ADDRESS, MEMBERSHIP_ABI, provider);
-  return await contract.checkMembership(userAddress);
-}
+export type TokenInfo = {
+  rawBalance: string;
+  balanceFormatted: string;
+  decimals: number;
+  symbol: string;
+  totalSupply: string;
+  maxSupply: string;
+};
 
-export async function getUserRole(userAddress: string) {
+export async function getTokenInfo(userAddress: string): Promise<TokenInfo> {
   const provider = getProvider();
-  const contract = new Contract(ROLE_MANAGER_ADDRESS, ROLE_MANAGER_ABI, provider);
+  const contract = new Contract(ADDRESSES.novelToken, NOVEL_TOKEN_ABI, provider);
 
-  const [admin, author, reader] = await Promise.all([
-    contract.isAdmin(userAddress),
-    contract.isAuthor(userAddress),
-    contract.isReader(userAddress),
+  const [rawBalance, decimals, symbol, totalSupply, maxSupply] = await Promise.all([
+    contract.balanceOf(userAddress),
+    contract.decimals(),
+    contract.symbol(),
+    contract.totalSupply(),
+    contract.MAX_SUPPLY(),
   ]);
 
-  if (admin) return "Admin";
-  if (author) return "Author";
-  if (reader) return "Reader";
-  return "No role";
+  return {
+    rawBalance: rawBalance.toString(),
+    balanceFormatted: formatUnits(rawBalance, decimals),
+    decimals: Number(decimals),
+    symbol,
+    totalSupply: formatUnits(totalSupply, decimals),
+    maxSupply: formatUnits(maxSupply, decimals),
+  };
 }
 
-export async function getNextContestId() {
+export async function getMembershipStatus(userAddress: string): Promise<boolean | null> {
   const provider = getProvider();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, provider);
-  const contestId = await contract.nextContestId();
-  return contestId.toString();
+
+  try {
+    const roleManager = new Contract(ADDRESSES.roleManager, ROLE_MANAGER_ABI, provider);
+    return await roleManager.checkMembership(userAddress);
+  } catch (err) {
+    console.warn("RoleManager.checkMembership failed:", err);
+  }
+
+  try {
+    const roleManager = new Contract(ADDRESSES.roleManager, ROLE_MANAGER_ABI, provider);
+    return await roleManager.isMember(userAddress);
+  } catch (err) {
+    console.warn("RoleManager.isMember failed:", err);
+  }
+
+  try {
+    const contestManager = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, provider);
+    const linkedRoleManager = await contestManager.roleManager();
+    const roleManager = new Contract(linkedRoleManager, ROLE_MANAGER_ABI, provider);
+    return await roleManager.checkMembership(userAddress);
+  } catch (err) {
+    console.warn("ContestManager.roleManager fallback failed:", err);
+  }
+
+  return null;
 }
 
-export async function submitNovel(
-  contestId: string,
-  title: string,
-  contentURI: string
-) {
+export type ContestInfo = {
+  name: string;
+  deadline: string;
+  active: boolean;
+  exists: boolean;
+  winnerFinalized: boolean;
+  submissionCount: string;
+};
+
+export async function getNextContestId(): Promise<string> {
   const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, signer);
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, provider);
+  const value = await contract.nextContestId();
+  return value.toString();
+}
+
+export async function getContestInfo(contestId: string): Promise<ContestInfo> {
+  const provider = getProvider();
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, provider);
+  const result = await contract.contests(contestId);
+
+  return {
+    name: result[0],
+    deadline: result[1].toString(),
+    active: result[2],
+    exists: result[3],
+    winnerFinalized: result[4],
+    submissionCount: result[5].toString(),
+  };
+}
+
+export async function createContest(name: string, deadline: string) {
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, signer);
+  return await contract.createContest(name, deadline);
+}
+
+export async function endVoting(contestId: string) {
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, signer);
+  return await contract.endVoting(contestId);
+}
+
+export async function finalizeWinner(contestId: string) {
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, signer);
+  return await contract.finalizeWinner(contestId);
+}
+
+export async function submitNovel(contestId: string, title: string, contentURI: string) {
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, signer);
   return await contract.submitNovel(contestId, title, contentURI);
+}
+
+export async function voteForSubmission(contestId: string, submissionId: string, amount: string) {
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, signer);
+  return await contract.vote(contestId, submissionId, amount);
 }
 
 export type Submission = {
@@ -111,124 +195,120 @@ export type Submission = {
   exists: boolean;
 };
 
-export async function getSubmissionsByContest(
-  contestId: string
-): Promise<Submission[]> {
+export async function getSubmissionsByContest(contestId: string): Promise<Submission[]> {
   const provider = getProvider();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, provider);
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, provider);
 
-  const ids = await contract.getSubmissionIds(contestId);
+  const contest = await contract.contests(contestId);
+  const submissionCount = Number(contest[5]);
 
-  const submissions = await Promise.all(
-    ids.map(async (id: bigint) => {
-      const result = await contract.submissions(contestId, id);
+  const rows: Submission[] = [];
 
-      return {
-        submissionId: id.toString(),
-        title: result[0],
-        contentURI: result[1],
-        author: result[2],
-        voteCount: result[3].toString(),
-        exists: result[4],
-      };
-    })
-  );
+  for (let i = 0; i < submissionCount; i++) {
+    try {
+      const submissionId = await contract.contestSubmissionIds(contestId, i);
+      const s = await contract.getSubmission(contestId, submissionId);
 
-  return submissions.filter((item) => item.exists);
+      rows.push({
+        submissionId: submissionId.toString(),
+        title: s[0],
+        contentURI: s[1],
+        author: s[2],
+        voteCount: s[3].toString(),
+        exists: s[4],
+      });
+    } catch (err) {
+      console.warn("submission load failed at index", i, err);
+    }
+  }
+
+  return rows.filter((x) => x.exists);
 }
 
-export async function voteForSubmission(
-  contestId: string,
-  submissionId: string,
-  amount: string
-) {
+export type WinnerInfo = {
+  title: string;
+  contentURI: string;
+  author: string;
+  voteCount: string;
+  exists: boolean;
+};
+
+export async function getWinner(contestId: string): Promise<WinnerInfo> {
   const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, signer);
-  return await contract.vote(contestId, submissionId, amount);
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, provider);
+  const top3Ids = await contract.getTop3SubmissionIds(contestId);
+
+  const firstId = top3Ids[0];
+  const s = await contract.getSubmission(contestId, firstId);
+
+  return {
+    title: s[0],
+    contentURI: s[1],
+    author: s[2],
+    voteCount: s[3].toString(),
+    exists: s[4],
+  };
 }
 
-export async function createContest(
-  name: string,
-  submissionDeadline: string,
-  votingDuration: string
-) {
+export async function getTop3(contestId: string) {
   const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, signer);
-  return await contract.createContest(name, submissionDeadline, votingDuration);
+  const contract = new Contract(ADDRESSES.contestManager, CONTEST_MANAGER_ABI, provider);
+
+  const [ids, authors] = await Promise.all([
+    contract.getTop3SubmissionIds(contestId),
+    contract.getTop3Authors(contestId),
+  ]);
+
+  return {
+    submissionIds: ids.map((x: bigint) => x.toString()),
+    authors: [...authors],
+  };
 }
 
-export async function endVoting(contestId: string) {
+export async function getMembershipPrice() {
   const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, signer);
-  return await contract.endVoting(contestId);
+  const contract = new Contract(ADDRESSES.treasury, TREASURY_ABI, provider);
+  const wei = await contract.getMembershipPriceInWei();
+  return { wei: wei.toString(), ethFormatted: formatEther(wei) };
 }
 
-export async function finalizeWinner(contestId: string) {
+export async function getTokenPrice(tokenAmount: string) {
   const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, signer);
-  return await contract.finalizeWinner(contestId);
-}
-
-export async function getWinner(contestId: string) {
-  const provider = getProvider();
-  const contract = new Contract(CONTEST_MANAGER_ADDRESS, CONTEST_MANAGER_ABI, provider);
-  const winner = await contract.getWinner(contestId);
-  return winner.toString();
-}
-
-export async function getMembershipPriceInWei() {
-  const provider = getProvider();
-  const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, provider);
-  const price = await contract.getMembershipPriceInWei();
-  return price.toString();
-}
-
-export async function getTokenPriceInWei(tokenAmount: string) {
-  const provider = getProvider();
-  const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, provider);
-  const price = await contract.getTokenPriceInWei(tokenAmount);
-  return price.toString();
+  const contract = new Contract(ADDRESSES.treasury, TREASURY_ABI, provider);
+  const wei = await contract.getTokenPriceInWei(tokenAmount);
+  return { wei: wei.toString(), ethFormatted: formatEther(wei) };
 }
 
 export async function getTreasuryBalance() {
   const provider = getProvider();
-  const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, provider);
-  const balance = await contract.getTreasuryBalance();
-  return balance.toString();
+  const contract = new Contract(ADDRESSES.treasury, TREASURY_ABI, provider);
+  const wei = await contract.getTreasuryBalance();
+  return { wei: wei.toString(), ethFormatted: formatEther(wei) };
 }
 
 export async function getContestPrizePool(contestId: string) {
   const provider = getProvider();
-  const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, provider);
-  const pool = await contract.getContestPrizePool(contestId);
-  return pool.toString();
+  const contract = new Contract(ADDRESSES.treasury, TREASURY_ABI, provider);
+  const wei = await contract.getContestPrizePool(contestId);
+  return { wei: wei.toString(), ethFormatted: formatEther(wei) };
 }
 
 export async function purchaseMembership(contestId: string) {
-  const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, signer);
-
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.treasury, TREASURY_ABI, signer);
   const price = await contract.getMembershipPriceInWei();
   return await contract.purchaseMembership(contestId, { value: price });
 }
 
 export async function buyExtraTokens(contestId: string, tokenAmount: string) {
-  const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, signer);
-
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.treasury, TREASURY_ABI, signer);
   const price = await contract.getTokenPriceInWei(tokenAmount);
   return await contract.buyExtraTokens(contestId, tokenAmount, { value: price });
 }
 
 export async function distributeReward(contestId: string) {
-  const provider = getProvider();
-  const signer = await provider.getSigner();
-  const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, signer);
+  const signer = await getSigner();
+  const contract = new Contract(ADDRESSES.treasury, TREASURY_ABI, signer);
   return await contract.distributeReward(contestId);
 }
